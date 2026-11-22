@@ -242,6 +242,12 @@
   }
 }
 
+.apiBtn {
+  margin-top: 0.75rem;
+  background: transparent;
+  border: 1px solid currentColor;
+}
+
 .errorMsg {
   margin-top: 1rem;
   color: #f87171;

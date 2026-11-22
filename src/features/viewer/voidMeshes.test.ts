@@ -7,14 +7,14 @@
  *   - Circle void produces a CylinderGeometry.
  *   - Rectangle void produces a BoxGeometry.
  *   - Positions are scaled by 0.001 (mm → m).
- *   - Garbage voids (location > 1e7 or size > 100 000) are skipped.
+ *   - Garbage voids (location > 1e10 or size > 100 000) are skipped.
  *   - Voids without a location are skipped (no mesh).
  *   - setVoidHighlight switches material correctly.
  */
 
 import { describe, it, expect } from 'vitest';
 import * as THREE from 'three';
-import { buildVoidMeshes, setVoidHighlight, STATUS_VOID_COLORS } from './voidMeshes';
+import { buildVoidMeshes, setVoidHighlight, setVoidsXray, STATUS_VOID_COLORS } from './voidMeshes';
 import type { VoidRow } from '../../data/VoidRepository';
 
 // ---------------------------------------------------------------------------
@@ -58,7 +58,7 @@ describe('buildVoidMeshes', () => {
   it('returns one mesh for one valid circle void', () => {
     const { group, byVoidId, skippedCount } = buildVoidMeshes([makeCircle({ id: 10 })]);
     expect(byVoidId.size).toBe(1);
-    expect(group.children.length).toBe(1);
+    expect(group.children.filter((c) => (c as THREE.Mesh).isMesh).length).toBe(1);
     expect(skippedCount).toBe(0);
   });
 
@@ -96,13 +96,20 @@ describe('buildVoidMeshes', () => {
     expect(mesh.userData.voidId).toBe(42);
   });
 
-  it('skips voids with location coordinates exceeding MAX_COORD_MM (1e7)', () => {
-    const garbage = makeCircle({ id: 99, location: { x: 1e8, y: 0, z: 0 } });
+  it('skips voids with location coordinates exceeding MAX_COORD_MM (1e10)', () => {
+    const garbage = makeCircle({ id: 99, location: { x: 1e11, y: 0, z: 0 } });
     const good = makeCircle({ id: 1 });
     const { byVoidId, skippedCount } = buildVoidMeshes([garbage, good]);
     expect(byVoidId.has(99)).toBe(false);
     expect(byVoidId.has(1)).toBe(true);
     expect(skippedCount).toBe(1);
+  });
+
+  it('keeps voids at survey coordinates hundreds of km from the origin', () => {
+    const survey = makeCircle({ id: 7, location: { x: 417_603_324.5, y: 78_718_396.4, z: 234_455 } });
+    const { byVoidId, skippedCount } = buildVoidMeshes([survey]);
+    expect(byVoidId.has(7)).toBe(true);
+    expect(skippedCount).toBe(0);
   });
 
   it('skips voids with diameter exceeding MAX_SIZE_MM (100 000)', () => {
@@ -131,7 +138,7 @@ describe('buildVoidMeshes', () => {
     const voids: VoidRow[] = [
       makeCircle({ id: 1 }),
       makeCircle({ id: 2, location: null }),
-      makeCircle({ id: 3, location: { x: 5e7, y: 0, z: 0 } }), // garbage
+      makeCircle({ id: 3, location: { x: 5e11, y: 0, z: 0 } }), // garbage
       makeRect({ id: 4 }),
       makeRect({ id: 5, sizeMm: { width: 200_000, height: 300 } }), // garbage
     ];
@@ -224,5 +231,46 @@ describe('STATUS_VOID_COLORS', () => {
 
   it('approved and rejected use distinct colours', () => {
     expect(STATUS_VOID_COLORS['approved']).not.toBe(STATUS_VOID_COLORS['rejected']);
+  });
+});
+
+describe('setVoidsXray', () => {
+  const depthTest = (m: THREE.Mesh) => (m.material as THREE.Material).depthTest;
+
+  it('draws voids through the model and keeps that through highlight toggles', () => {
+    const { group, byVoidId } = buildVoidMeshes([makeCircle({ id: 1 })]);
+    const mesh = byVoidId.get(1)!;
+    expect(depthTest(mesh)).toBe(true);
+
+    setVoidsXray(group, true);
+    expect(depthTest(mesh)).toBe(false);
+
+    setVoidHighlight(mesh, true);
+    expect(depthTest(mesh)).toBe(false);
+    expect(mesh.renderOrder).toBeGreaterThan(10); // selected void drawn last
+
+    setVoidHighlight(mesh, false);
+    expect(depthTest(mesh)).toBe(false);
+    expect(mesh.renderOrder).toBe(10);
+
+    setVoidsXray(group, false);
+    expect(depthTest(mesh)).toBe(true);
+  });
+
+  it('shows one marker dot per void in X-ray mode, amber while highlighted', () => {
+    const { group, byVoidId } = buildVoidMeshes([makeCircle({ id: 1 }), makeRect({ id: 2 })]);
+    const markers = group.children.find((c) => (c as THREE.Points).isPoints) as THREE.Points;
+    expect(markers.geometry.getAttribute('position').count).toBe(2);
+    expect(markers.visible).toBe(false);
+    setVoidsXray(group, true);
+    expect(markers.visible).toBe(true);
+
+    const colors = markers.geometry.getAttribute('color');
+    const hexAt = (i: number) => new THREE.Color(colors.getX(i), colors.getY(i), colors.getZ(i)).getHex();
+    expect(hexAt(0)).toBe(STATUS_VOID_COLORS['concept']);
+    setVoidHighlight(byVoidId.get(1)!, true);
+    expect(hexAt(0)).toBe(0xfbbf24);
+    setVoidHighlight(byVoidId.get(1)!, false);
+    expect(hexAt(0)).toBe(STATUS_VOID_COLORS['concept']);
   });
 });

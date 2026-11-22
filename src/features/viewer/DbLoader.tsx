@@ -25,9 +25,11 @@ type LoadPhase = 'idle' | 'checking' | 'loading' | 'error';
 
 interface DbLoaderProps {
   onLoaded: (bytes: Uint8Array, canWriteBack: boolean) => void;
+  /** When set, offers reading voids from the Void Manager web API instead of a .db. */
+  api?: { url: string; onConnect: () => void };
 }
 
-export default function DbLoader({ onLoaded }: DbLoaderProps) {
+export default function DbLoader({ onLoaded, api }: DbLoaderProps) {
   const [phase, setPhase] = useState<LoadPhase>('checking');
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -147,6 +149,19 @@ export default function DbLoader({ onLoaded }: DbLoaderProps) {
             {phase === 'loading' ? 'Opening…' : 'Connect .db file'}
             <span className={styles.btnArrow} aria-hidden="true">→</span>
           </button>
+
+          {api && (
+            <button
+              type="button"
+              className={`${styles.connectBtn} ${styles.apiBtn}`}
+              onClick={api.onConnect}
+              data-testid="api-connect"
+              title={api.url}
+            >
+              Use Void Manager API
+              <span className={styles.btnArrow} aria-hidden="true">→</span>
+            </button>
+          )}
 
           {/* Hidden file input — Playwright drives this via setInputFiles (data-testid) */}
           <input

@@ -21,6 +21,10 @@ import PropertyBrowser from '../browser/PropertyBrowser';
 import { normalizeSpatialStructure, type TreeNode } from '../browser/spatialTree';
 import styles from './ThreeDViewer.module.css';
 
+/** localStorage key remembering whether the side panel is open. */
+const PANEL_KEY = 'vm.viewer.sidePanel';
+const XRAY_KEY = 'vm.viewer.voidXray';
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -29,7 +33,7 @@ type ViewerStatus =
   | { tag: 'idle' }
   | { tag: 'initializing' }
   | { tag: 'ready' }
-  | { tag: 'loading'; percent: number }
+  | { tag: 'loading'; percent: number; step?: string }
   | { tag: 'loaded'; model: LoadedModel }
   | { tag: 'error'; message: string };
 
@@ -72,10 +76,23 @@ const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(
     const controllerRef = useRef<WorldController | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const [status, setStatus] = useState<ViewerStatus>({ tag: 'idle' });
+    const [panelOpen, setPanelOpen] = useState(() => localStorage.getItem(PANEL_KEY) !== 'closed');
+    useEffect(() => {
+      localStorage.setItem(PANEL_KEY, panelOpen ? 'open' : 'closed');
+    }, [panelOpen]);
+
+    // X-ray: voids drawn through the model (on by default — they sit inside their hosts).
+    const [voidXray, setVoidXray] = useState(() => localStorage.getItem(XRAY_KEY) !== 'off');
     const initPromiseRef = useRef<Promise<void> | null>(null);
     const [voidMeshCount, setVoidMeshCount] = useState(0);
     // Tracks whether the WorldController is ready to accept setVoids calls.
     const [worldReady, setWorldReady] = useState(false);
+    useEffect(() => {
+      localStorage.setItem(XRAY_KEY, voidXray ? 'on' : 'off');
+      if (worldReady) controllerRef.current?.setVoidXray(voidXray);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [voidXray, worldReady]);
+
     // M13: model browser tree.
     const [trees, setTrees] = useState<TreeNode[]>([]);
 
@@ -191,6 +208,8 @@ const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(
       void (async () => {
         try {
           await ctrl.setSelection([...selection.refs]);
+          // A row picked in the grid: fly to it so it can be found in the model.
+          if (selection.source === 'grid' && selection.refs.length > 0) await ctrl.zoomToSelection();
         } catch (e) {
           console.warn('[ThreeDViewer] setSelection failed', e);
         }
@@ -316,19 +335,22 @@ const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(
     // -------------------------------------------------------------------------
     // Load IFC handler (shared by button and file input)
     // -------------------------------------------------------------------------
-    const handleFileBytes = useCallback(async (bytes: Uint8Array, name: string) => {
+    /** Load one IFC; `step` (e.g. "2/3") labels the progress when several files load in a row. Returns success. */
+    const handleFileBytes = useCallback(async (bytes: Uint8Array, name: string, step?: string): Promise<boolean> => {
       const ctrl = controllerRef.current;
-      if (!ctrl) return;
+      if (!ctrl) return false;
 
-      setStatus({ tag: 'loading', percent: 0 });
+      setStatus({ tag: 'loading', percent: 0, step });
       try {
         const model = await ctrl.loadIfc(bytes, name, ({ percent }) => {
-          setStatus({ tag: 'loading', percent });
+          setStatus({ tag: 'loading', percent, step });
         });
         setStatus({ tag: 'loaded', model });
+        return true;
       } catch (e) {
         console.error('[ThreeDViewer] IFC load failed', e);
-        setStatus({ tag: 'error', message: e instanceof Error ? e.message : String(e) });
+        setStatus({ tag: 'error', message: `${name}: ${e instanceof Error ? e.message : String(e)}` });
+        return false;
       }
     }, []);
 
@@ -336,12 +358,17 @@ const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(
     // File input change handler
     // -------------------------------------------------------------------------
     async function handleFileInputChange(e: React.ChangeEvent<HTMLInputElement>) {
-      const file = e.target.files?.[0];
-      if (!file) return;
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      await handleFileBytes(bytes, file.name.replace(/\.ifc$/i, ''));
-      // Reset input so the same file can be re-loaded
-      e.target.value = '';
+      const input = e.target;
+      const files = [...(input.files ?? [])];
+      // Load one after another, not in parallel: the first model fixes the shared coordinate
+      // offset that every later model (and the void meshes) is aligned to.
+      for (const [i, file] of files.entries()) {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const step = files.length > 1 ? `${i + 1}/${files.length}` : undefined;
+        if (!(await handleFileBytes(bytes, file.name.replace(/\.ifc$/i, ''), step))) break;
+      }
+      // Reset input so the same files can be re-loaded
+      input.value = '';
     }
 
     // -------------------------------------------------------------------------
@@ -363,7 +390,7 @@ const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(
         case 'ready':
           return 'Ready — load an IFC file';
         case 'loading':
-          return `Loading IFC… ${status.percent.toFixed(0)}%`;
+          return `Loading IFC${status.step ? ` ${status.step}` : ''}… ${status.percent.toFixed(0)}%`;
         case 'loaded':
           return `Loaded ${status.model.elementCount} elements`;
         case 'error':
@@ -379,12 +406,7 @@ const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(
     // -------------------------------------------------------------------------
     return (
       <div className={styles.viewerWrapper}>
-        {/* Model browser — left fixed panel, always visible */}
-        <div className={styles.browserDrawer} data-testid="model-browser-drawer">
-          <ModelBrowser trees={trees} />
-        </div>
-
-        {/* Canvas column — fills space between the two panels */}
+        {/* Canvas column — fills the space left of the side panel */}
         <div className={styles.canvasColumn}>
           {/* IFC load progress bar */}
           {status.tag === 'loading' && (
@@ -411,9 +433,11 @@ const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(
               className={styles.loadBtn}
               onClick={handleLoadButtonClick}
               disabled={isLoading || !canLoad}
-              title="Load a local .ifc file into the 3D viewer"
+              title="Load one or more local .ifc files into the 3D viewer (select several to federate them)"
             >
-              {status.tag === 'loading' ? `Loading… ${status.percent.toFixed(0)}%` : 'Load IFC'}
+              {status.tag === 'loading'
+                ? `Loading${status.step ? ` ${status.step}` : ''}… ${status.percent.toFixed(0)}%`
+                : 'Load IFC'}
             </button>
 
             {/* Visible, reachable file input for Playwright E2E + non-button access */}
@@ -421,6 +445,7 @@ const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(
               ref={fileInputRef}
               type="file"
               accept=".ifc"
+              multiple
               data-testid="ifc-file-input"
               className={styles.fileInput}
               onChange={(e) => void handleFileInputChange(e)}
@@ -446,6 +471,17 @@ const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(
               title="Zoom the camera to fit all visible objects"
             >
               Zoom to Fit
+            </button>
+
+            <button
+              type="button"
+              className={`${styles.loadBtn} ${voidXray ? styles.toggleOn : ''}`}
+              onClick={() => setVoidXray((on) => !on)}
+              aria-pressed={voidXray}
+              data-testid="void-xray"
+              title="X-ray: show voids through the model instead of hidden inside their slabs and walls"
+            >
+              X-ray voids
             </button>
 
             {/* Section plane */}
@@ -499,14 +535,46 @@ const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(
           )}
         </div>
 
-        {/* Property browser — right fixed panel, always visible */}
-        <div className={styles.propertyDrawer} data-testid="property-browser-drawer">
-          <PropertyBrowser
-            properties={elementProperties}
-            loading={propertiesLoading}
-            elementLabel={elementProperties?.Name}
-          />
-        </div>
+        {/* Side panel (right): model tree above, properties below. Stays mounted when hidden
+            so the tree keeps its expanded nodes; the renderer resizes via its ResizeObserver. */}
+        <aside className={styles.sidePanel} hidden={!panelOpen} data-testid="side-panel">
+          <div className={styles.panelHeader}>
+            <span>Model</span>
+            <button
+              type="button"
+              className={styles.panelToggle}
+              onClick={() => setPanelOpen(false)}
+              aria-label="Hide side panel"
+              title="Hide panel"
+            >
+              ›
+            </button>
+          </div>
+          <div className={styles.browserSection} data-testid="model-browser-drawer">
+            <ModelBrowser trees={trees} />
+          </div>
+          <div className={styles.panelHeader}>
+            <span>Properties</span>
+          </div>
+          <div className={styles.propertySection} data-testid="property-browser-drawer">
+            <PropertyBrowser
+              properties={elementProperties}
+              loading={propertiesLoading}
+              elementLabel={elementProperties?.Name}
+            />
+          </div>
+        </aside>
+        {!panelOpen && (
+          <button
+            type="button"
+            className={styles.panelReopen}
+            onClick={() => setPanelOpen(true)}
+            aria-label="Show side panel"
+            data-testid="side-panel-show"
+          >
+            ‹ Model
+          </button>
+        )}
       </div>
     );
   }

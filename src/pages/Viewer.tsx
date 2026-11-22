@@ -15,6 +15,7 @@ import DbLoader from '../features/viewer/DbLoader';
 import ThreeDViewer, { type ThreeDViewerHandle } from '../features/viewer/ThreeDViewer';
 import VoidGrid from '../features/voids/VoidGrid';
 import { createLocalRepository } from '../data/sqlEngine';
+import { ApiRepository } from '../data/ApiRepository';
 import type { VoidRepository, VoidRow, ProjectSummary } from '../data/VoidRepository';
 import type { ApprovalStatus } from '../data/schema';
 import { saveConfig, getMostRecent } from '../features/config/configStore';
@@ -24,6 +25,9 @@ import styles from './Viewer.module.css';
 // ---------------------------------------------------------------------------
 // Viewer state machine
 // ---------------------------------------------------------------------------
+
+/** Void Manager web API base URL (e.g. http://localhost:5080), from .env.local. */
+const API_URL: string | undefined = import.meta.env.VITE_API_URL || undefined;
 
 type ViewerPhase =
   | { tag: 'needsDb' }
@@ -248,6 +252,27 @@ export default function Viewer() {
   }, []);
 
   // -------------------------------------------------------------------------
+  // Connect to the Void Manager web API instead of a .db
+  // -------------------------------------------------------------------------
+  async function handleApiConnect(url: string) {
+    setPhase({ tag: 'loading' });
+    setCanWriteBack(false);
+    dbBytesRef.current = null;
+    try {
+      const repo = new ApiRepository(url);
+      const projs = await repo.listProjects();
+      setProjects(projs);
+      setSelectedProject(null);
+      setPhase({ tag: 'ready', repo, canWriteBack: false });
+      await loadVoids(repo, null, false);
+    } catch (e) {
+      console.error('[Viewer] API connect failed', e);
+      setDbError(`Failed to read from the API: ${e instanceof Error ? e.message : String(e)}`);
+      setPhase({ tag: 'needsDb' });
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // M6: Restore session from saved config
   // -------------------------------------------------------------------------
   async function handleRestoreConfig() {
@@ -384,7 +409,10 @@ export default function Viewer() {
             )}
           </div>
         )}
-        <DbLoader onLoaded={(bytes, wb) => void handleDbLoaded(bytes, wb)} />
+        <DbLoader
+          onLoaded={(bytes, wb) => void handleDbLoaded(bytes, wb)}
+          api={API_URL ? { url: API_URL, onConnect: () => void handleApiConnect(API_URL) } : undefined}
+        />
       </div>
     );
   }
