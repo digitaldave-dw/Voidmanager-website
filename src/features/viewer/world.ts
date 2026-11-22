@@ -18,7 +18,7 @@
 import * as THREE from 'three';
 import * as OBC from '@thatopen/components';
 import type { VoidRow } from '../../data/VoidRepository';
-import { buildVoidMeshes, setVoidHighlight } from './voidMeshes';
+import { buildVoidMeshes, setVoidHighlight, setVoidsXray } from './voidMeshes';
 import { sphereFromBox, unionBoxes } from './boxUtils';
 import { chooseNearestHit, type VoidHit, type ElementHit } from './pick';
 import { buildIfcIndex, resolveVoidToElement } from '../../lib/ifcIndex';
@@ -82,6 +82,8 @@ export interface WorldController {
   setSelection(refs: SelectionRef[]): Promise<void>;
   /** Fit the camera to the bounding sphere of the current selection (Zoom to). */
   zoomToSelection(): Promise<void>;
+  /** X-ray: draw voids through the model so they are not hidden inside their hosts. */
+  setVoidXray(on: boolean): void;
   /** Fit the camera to all visible objects — models + void group (Zoom to Fit). */
   zoomToFit(): Promise<void>;
   /**
@@ -166,6 +168,9 @@ export async function createWorldController(container: HTMLDivElement): Promise<
 
   world.scene = new OBC.SimpleScene(components);
   world.renderer = new OBC.SimpleRenderer(components, container);
+  // Hide the That Open Company wordmark that SimpleRenderer overlays on the viewport
+  // (official switch since @thatopen/components 3.6).
+  world.renderer.showLogo = false;
   world.camera = new OBC.OrthoPerspectiveCamera(components);
 
   components.init();
@@ -291,7 +296,7 @@ export async function createWorldController(container: HTMLDivElement): Promise<
     const planes: THREE.Plane[] = simplePlane ? [simplePlane.three] : [];
     voidGroup.traverse((obj) => {
       const mesh = obj as THREE.Mesh;
-      if (!mesh.isMesh) return;
+      if (!mesh.isMesh && !(obj as THREE.Points).isPoints) return; // void meshes and their markers
       const mat = mesh.material as THREE.Material | THREE.Material[];
       if (!mat) return;
       if (Array.isArray(mat)) {
@@ -457,6 +462,13 @@ export async function createWorldController(container: HTMLDivElement): Promise<
     console.debug('[world] void→element matches:', voidToElement.size, 'of', voidMeshMap.size);
   }
 
+  let voidXray = true;
+
+  function setVoidXray(on: boolean): void {
+    voidXray = on;
+    if (voidGroup) setVoidsXray(voidGroup, on);
+  }
+
   /** Kept in sync by setVoids — needed for resolveVoidToElement lookups. */
   const _currentVoids: VoidRow[] = [];
 
@@ -482,6 +494,7 @@ export async function createWorldController(container: HTMLDivElement): Promise<
 
     voidGroup = group;
     voidMeshMap = byVoidId;
+    setVoidsXray(voidGroup, voidXray);
     // Apply coordination offset so void meshes stay co-located with IFC geometry.
     if (coordinationOffset) voidGroup.position.copy(coordinationOffset);
     world.scene.three.add(voidGroup);
@@ -1028,6 +1041,7 @@ export async function createWorldController(container: HTMLDivElement): Promise<
     setVoids,
     setSelection,
     zoomToSelection,
+    setVoidXray,
     zoomToFit,
     pickAt,
     getSpatialStructures,

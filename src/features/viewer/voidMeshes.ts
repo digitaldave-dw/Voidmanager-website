@@ -26,13 +26,18 @@ import type { ApprovalStatus } from "../../data/schema";
  * size values around 1e20 – 1e21.  Anything beyond these limits is skipped.
  */
 const MAX_SIZE_MM = 100_000; // 100 m in mm
-const MAX_COORD_MM = 1e7; // 10 km in mm
+// Real projects use survey/shared coordinates hundreds of km from the origin
+// (Snowdon Towers sample: ~418 km), so only reject clearly impossible values.
+const MAX_COORD_MM = 1e10; // 10 000 km in mm
 
 /** Default scale: Revit internal mm → scene metres. */
 const DEFAULT_SCALE = 0.001;
 
 /** Fallback thickness (mm) when thicknessMm is null/zero. */
 const FALLBACK_THICKNESS_MM = 300;
+
+/** Voids render after the IFC model so they can be drawn over it (X-ray mode). */
+const XRAY_RENDER_ORDER = 10;
 
 // ---------------------------------------------------------------------------
 // Status colours
@@ -72,7 +77,7 @@ function makeBaseMaterial(hex: number): THREE.MeshStandardMaterial {
     color,
     emissive: color.clone().multiplyScalar(0.18),
     transparent: true,
-    opacity: 0.5,
+    opacity: 0.7,
     side: THREE.DoubleSide,
     depthWrite: false,
   });
@@ -280,10 +285,13 @@ export function buildVoidMeshes(
     mesh.userData.voidId = v.id;
     mesh.userData.baseMaterial = mat;
     mesh.name = `void-${v.id}`;
+    mesh.renderOrder = XRAY_RENDER_ORDER;
 
     group.add(mesh);
     byVoidId.set(v.id, mesh);
   }
+
+  if (byVoidId.size > 0) group.add(buildVoidMarkers([...byVoidId.values()]));
 
   return { group, byVoidId, skippedCount };
 }
@@ -308,4 +316,104 @@ export function setVoidHighlight(mesh: THREE.Mesh, on: boolean): void {
         ? base
         : makeBaseMaterial(0x38bdf8);
   }
+  applyXray(mesh, mesh.userData.xray === true);
+  // Draw the highlighted void after the others so it stays on top in X-ray mode.
+  mesh.renderOrder = on ? XRAY_RENDER_ORDER + 1 : XRAY_RENDER_ORDER;
+  setMarkerColor(mesh, on ? HIGHLIGHT_COLOR : mesh.userData.statusColor);
+}
+
+// ---------------------------------------------------------------------------
+// Markers — one dot per void with a fixed size on screen
+// ---------------------------------------------------------------------------
+
+/**
+ * Voids are 0.1–0.5 m on buildings tens of metres wide, so from an overview they are a pixel or two.
+ * A dot per void with a fixed size in pixels keeps every void visible at any zoom (shown in X-ray mode).
+ */
+const MARKER_SIZE_PX = 9;
+const HIGHLIGHT_COLOR = 0xfbbf24;
+
+/** Round dot sprite built from raw pixels, so it also works without a canvas (tests). */
+function makeDotTexture(): THREE.DataTexture {
+  const n = 32;
+  const data = new Uint8Array(n * n * 4);
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      const d = Math.hypot(x + 0.5 - n / 2, y + 0.5 - n / 2) / (n / 2);
+      const i = (y * n + x) * 4;
+      const edge = d > 0.72 && d <= 1; // dark rim so dots read on light slabs
+      data.set(d > 1 ? [0, 0, 0, 0] : edge ? [40, 40, 40, 255] : [255, 255, 255, 255], i);
+    }
+  }
+  const tex = new THREE.DataTexture(data, n, n);
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function buildVoidMarkers(meshes: THREE.Mesh[]): THREE.Points {
+  const positions = new Float32Array(meshes.length * 3);
+  const colors = new Float32Array(meshes.length * 3);
+  const color = new THREE.Color();
+  meshes.forEach((mesh, i) => {
+    positions.set([mesh.position.x, mesh.position.y, mesh.position.z], i * 3);
+    const base = mesh.userData.baseMaterial as THREE.MeshStandardMaterial;
+    mesh.userData.statusColor = base.color.getHex();
+    color.setHex(mesh.userData.statusColor).toArray(colors, i * 3);
+  });
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  const markers = new THREE.Points(
+    geometry,
+    new THREE.PointsMaterial({
+      size: MARKER_SIZE_PX,
+      sizeAttenuation: false,
+      vertexColors: true,
+      map: makeDotTexture(),
+      alphaTest: 0.5,
+      depthTest: false,
+      depthWrite: false,
+    }),
+  );
+  markers.name = 'void-markers';
+  markers.renderOrder = XRAY_RENDER_ORDER + 2;
+  markers.visible = false; // shown in X-ray mode
+  markers.raycast = () => {}; // picking goes to the void meshes
+  meshes.forEach((mesh, i) => {
+    mesh.userData.markers = markers;
+    mesh.userData.markerIndex = i;
+  });
+  return markers;
+}
+
+function setMarkerColor(mesh: THREE.Mesh, hex: number | undefined): void {
+  const markers = mesh.userData.markers as THREE.Points | undefined;
+  if (!markers || hex === undefined) return;
+  const attr = markers.geometry.getAttribute('color') as THREE.BufferAttribute;
+  const c = new THREE.Color(hex);
+  attr.setXYZ(mesh.userData.markerIndex as number, c.r, c.g, c.b);
+  attr.needsUpdate = true;
+}
+
+// ---------------------------------------------------------------------------
+// X-ray mode
+// ---------------------------------------------------------------------------
+
+function applyXray(mesh: THREE.Mesh, on: boolean): void {
+  mesh.userData.xray = on;
+  const materials = [mesh.material, mesh.userData.baseMaterial].flat();
+  for (const m of materials) {
+    if (m instanceof THREE.Material) m.depthTest = !on;
+  }
+}
+
+/**
+ * X-ray mode: voids are drawn through the model (no depth test). Voids sit inside slabs and walls, so
+ * with a normal depth test they are hidden by their own host as soon as an IFC is loaded.
+ */
+export function setVoidsXray(group: THREE.Object3D, on: boolean): void {
+  group.traverse((o) => {
+    if ((o as THREE.Mesh).isMesh) applyXray(o as THREE.Mesh, on);
+    if ((o as THREE.Points).isPoints) o.visible = on;
+  });
 }

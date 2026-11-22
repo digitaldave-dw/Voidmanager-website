@@ -36,16 +36,14 @@ ModuleRegistry.registerModules([AllCommunityModule]);
 // ---------------------------------------------------------------------------
 // Garbage-size guard: values over 100 000 mm are legacy ProjectStartUp artefacts.
 // ---------------------------------------------------------------------------
-const MAX_COORD = 100_000;
+const MAX_SIZE_MM = 100_000;
 
-function guardNum(value: number | null | undefined): string {
-  if (value == null) return '—';
-  if (!isFinite(value) || Math.abs(value) > MAX_COORD) return '—';
-  return String(value);
-}
+/** Locations may be survey coordinates hundreds of km out; same limit as voidMeshes.ts. */
+const MAX_LOCATION = 1e10;
 
 function guardCoord(value: number | null | undefined): string {
-  return guardNum(value);
+  if (value == null || !isFinite(value) || Math.abs(value) > MAX_LOCATION) return '—';
+  return String(value);
 }
 
 // ---------------------------------------------------------------------------
@@ -170,7 +168,7 @@ function buildColumnDefs(): ColDef<VoidRow>[] {
         const { name, elevation } = data.story;
         if (elevation == null) return name;
         const m = (elevation / 1000).toFixed(3);
-        return `${name} (+${m} m)`;
+        return `${name} (${elevation >= 0 ? '+' : ''}${m} m)`;
       },
       filter: 'agTextColumnFilter',
       floatingFilter: true,
@@ -194,11 +192,11 @@ function buildColumnDefs(): ColDef<VoidRow>[] {
         if (!data) return '—';
         if (data.type === 'circle') {
           const d = data.sizeMm.diameter;
-          return d != null && isFinite(d) && d <= MAX_COORD ? `Ø ${d} mm` : '—';
+          return d != null && isFinite(d) && d <= MAX_SIZE_MM ? `Ø ${d} mm` : '—';
         } else {
           const w = data.sizeMm.width;
           const h = data.sizeMm.height;
-          if (w != null && h != null && isFinite(w) && isFinite(h) && w <= MAX_COORD && h <= MAX_COORD) {
+          if (w != null && h != null && isFinite(w) && isFinite(h) && w <= MAX_SIZE_MM && h <= MAX_SIZE_MM) {
             return `${w} × ${h} mm`;
           }
           return '—';
@@ -215,7 +213,7 @@ function buildColumnDefs(): ColDef<VoidRow>[] {
       valueGetter: ({ data }: { data?: VoidRow }) => {
         if (!data?.thicknessMm) return '—';
         const t = data.thicknessMm;
-        return isFinite(t) && t <= MAX_COORD ? `${t} mm` : '—';
+        return isFinite(t) && t <= MAX_SIZE_MM ? `${t} mm` : '—';
       },
       filter: 'agTextColumnFilter',
       floatingFilter: true,
@@ -416,7 +414,8 @@ export default function VoidGrid({
   );
 
   const rowSelection = useMemo(
-    () => ({ mode: 'multiRow' as const }),
+    // Click a row to select it (and fly to it in 3D); Ctrl/Shift+click to add rows.
+    () => ({ mode: 'multiRow' as const, enableClickSelection: true }),
     [],
   );
 
