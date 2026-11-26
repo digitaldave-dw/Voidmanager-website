@@ -20,7 +20,13 @@ import * as OBC from '@thatopen/components';
 import type { VoidRow } from '../../data/VoidRepository';
 import { buildVoidMeshes, setVoidHighlight, setVoidsXray } from './voidMeshes';
 import { sphereFromBox, unionBoxes } from './boxUtils';
-import { chooseNearestHit, type VoidHit, type ElementHit } from './pick';
+import {
+  chooseNearestHit,
+  nearestPickable,
+  NON_PICKABLE_CATEGORIES,
+  type VoidHit,
+  type ElementHit,
+} from './pick';
 import { buildIfcIndex, resolveVoidToElement } from '../../lib/ifcIndex';
 import type { IfcIndex } from '../../lib/ifcIndex';
 import type { SelectionRef } from '../../store/selectionStore';
@@ -331,6 +337,23 @@ export async function createWorldController(container: HTMLDivElement): Promise<
 
   /** Map from fragments model id → human-readable name (filename without extension). */
   const loadedModels = new Map<string, string>();
+  /** Per model: localIds that must not catch clicks (rooms, openings), loaded lazily. */
+  const nonPickableIds = new Map<string, Promise<Set<number>>>();
+
+  function getNonPickableIds(modelId: string, model: FRAGS.FragmentsModel): Promise<Set<number>> {
+    let ids = nonPickableIds.get(modelId);
+    if (!ids) {
+      ids = model
+        .getItemsOfCategories([...NON_PICKABLE_CATEGORIES])
+        .then((byCategory) => new Set(Object.values(byCategory).flat()))
+        .catch((e) => {
+          console.warn('[world] getItemsOfCategories failed:', e);
+          return new Set<number>();
+        });
+      nonPickableIds.set(modelId, ids);
+    }
+    return ids;
+  }
 
   /** Which model the current voidToElement map resolves against (null if none). */
   let voidMatchModelId: string | null = null;
@@ -374,6 +397,7 @@ export async function createWorldController(container: HTMLDivElement): Promise<
 
     const modelId = model.modelId ?? name;
     loadedModels.set(modelId, name);
+    nonPickableIds.delete(modelId);
 
     // On the first model, record the web-ifc coordination matrix translation so
     // void meshes can be shifted by the same amount. web-ifc bakes a coordination
@@ -705,6 +729,8 @@ export async function createWorldController(container: HTMLDivElement): Promise<
       );
       const ray = new THREE.Raycaster();
       ray.setFromCamera(ndc, world.camera.three);
+      // Geometry closer than the near plane is clipped; don't let it catch clicks.
+      ray.near = world.camera.three.near;
       const hits = ray.intersectObjects(voidGroup.children, false);
       if (hits.length > 0) {
         const voidId = hits[0].object.userData.voidId as number | undefined;
@@ -718,23 +744,34 @@ export async function createWorldController(container: HTMLDivElement): Promise<
     // Try all loaded models; keep the nearest hit.
     let elementHit: ElementHit | null = null;
     let elementHitModelId: string | null = null;
+    const cam = world.camera.three;
+    const camPos = cam.getWorldPosition(new THREE.Vector3());
+    const viewDir = cam.getWorldDirection(new THREE.Vector3());
     for (const [modelId] of loadedModels) {
       const model = fragments.list.get(modelId);
       if (!model) continue;
       try {
-        const result = (await model.raycast({
-          camera: world.camera.three,
-          mouse: new THREE.Vector2(clientX, clientY),
-          dom,
-        })) as { localId?: number; distance?: number; point?: THREE.Vector3 } | null;
-        if (result && typeof result.localId === 'number') {
-          const dist =
-            result.distance ??
-            (result.point ? world.camera.three.position.distanceTo(result.point) : Infinity);
-          if (!elementHit || dist < elementHit.distance) {
-            elementHit = { kind: 'element', localId: result.localId, distance: dist };
-            elementHitModelId = modelId;
-          }
+        // raycastAll, not raycast: the nearest hit is often a room (IfcSpace) that
+        // wraps the slab or pipe the user actually clicked.
+        const [results, excluded] = await Promise.all([
+          model.raycastAll({
+            camera: world.camera.three,
+            mouse: new THREE.Vector2(clientX, clientY),
+            dom,
+          }) as Promise<{ localId?: number; distance?: number; point?: THREE.Vector3 }[] | null>,
+          getNonPickableIds(modelId, model),
+        ]);
+        const hits = (results ?? [])
+          .filter((r) => typeof r.localId === 'number')
+          .map((r) => ({
+            localId: r.localId as number,
+            distance: r.distance ?? (r.point ? camPos.distanceTo(r.point) : Infinity),
+            depth: r.point ? r.point.clone().sub(camPos).dot(viewDir) : undefined,
+          }));
+        const best = nearestPickable(hits, excluded, cam.near);
+        if (best && (!elementHit || best.distance < elementHit.distance)) {
+          elementHit = { kind: 'element', localId: best.localId, distance: best.distance };
+          elementHitModelId = modelId;
         }
       } catch (e) {
         console.warn('[world] fragments raycast failed:', e);
@@ -946,6 +983,7 @@ export async function createWorldController(container: HTMLDivElement): Promise<
 
     const resolvedId = model.modelId ?? id;
     loadedModels.set(resolvedId, id);
+    nonPickableIds.delete(resolvedId);
 
     // Fragment models (cache restore) have the coordination offset baked into their
     // vertex geometry — read it via getCoordinates() the same way loadIfc does.
@@ -1015,6 +1053,7 @@ export async function createWorldController(container: HTMLDivElement): Promise<
 
   function dispose(): void {
     loadedModels.clear();
+    nonPickableIds.clear();
     highlightedElements.clear();
     // Capture the canvas before tearing components down.
     const canvasEl = world.renderer?.three.domElement ?? null;

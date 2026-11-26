@@ -107,7 +107,7 @@ export const COLUMN_LABELS: Record<string, string> = {
   externalId: 'External ID',
 };
 
-function buildColumnDefs(): ColDef<VoidRow>[] {
+function buildColumnDefs(canEditStatus: boolean): ColDef<VoidRow>[] {
   return [
     {
       colId: 'sequenceName',
@@ -136,7 +136,8 @@ function buildColumnDefs(): ColDef<VoidRow>[] {
       field: 'status',
       width: 170,
       // M14: the ONLY inline-editable column — a fixed-value select dropdown.
-      editable: true,
+      // Off when nothing can save the change (read-only source).
+      editable: canEditStatus,
       cellEditor: 'agSelectCellEditor',
       cellEditorParams: { values: [...APPROVAL_STATUSES] },
       // Brand status colour-coding — text-only so it stays legible against the
@@ -366,7 +367,16 @@ export interface VoidGridProps {
   onIncludeClosedChange: (v: boolean) => void;
   /** Called whenever a void's status is changed in-grid (inline or bulk). */
   onStatusChange?: (id: number, status: ApprovalStatus) => void;
+  /**
+   * Whether statuses may be edited. False for read-only sources: the Status cell
+   * and "Set status…" are disabled and `readOnlyReason` explains why.
+   */
+  canEditStatus?: boolean;
+  /** Tooltip on the disabled status controls. */
+  readOnlyReason?: string;
 }
+
+const DEFAULT_READ_ONLY_REASON = 'Read-only: status changes cannot be saved from this source.';
 
 // ---------------------------------------------------------------------------
 // VoidGrid component
@@ -378,9 +388,11 @@ export default function VoidGrid({
   includeClosed,
   onIncludeClosedChange,
   onStatusChange,
+  canEditStatus = true,
+  readOnlyReason = DEFAULT_READ_ONLY_REASON,
 }: VoidGridProps) {
   const gridRef = useRef<AgGridReact<VoidRow>>(null);
-  const columnDefs = useMemo(() => buildColumnDefs(), []);
+  const columnDefs = useMemo(() => buildColumnDefs(canEditStatus), [canEditStatus]);
   const summary = useMemo(() => buildSummary(rows), [rows]);
 
   // Unified selection store (grid ↔ 3D ↔ browser).
@@ -395,6 +407,17 @@ export default function VoidGrid({
   useEffect(() => {
     setDirtyIds(new Set());
   }, [rows]);
+
+  // Status edits are kept in this tab only: warn before the page is closed or reloaded.
+  useEffect(() => {
+    if (dirtyIds.size === 0) return;
+    const warn = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [dirtyIds]);
 
   // Track which columns are visible for the chooser checkboxes.
   const [visibleCols, setVisibleCols] = useState<Set<string>>(
@@ -424,8 +447,10 @@ export default function VoidGrid({
   }, []);
 
   const onSelectionChanged = useCallback((event: SelectionChangedEvent<VoidRow>) => {
-    // Ignore selection events caused by our own programmatic reflection.
-    if (applyingExternalRef.current) return;
+    // Ignore selection events caused by our own programmatic reflection. AG Grid can
+    // fire them after the flag is reset, so also skip every API-driven event: echoing
+    // it would replace a 3D element selection with an empty void selection.
+    if (applyingExternalRef.current || event.source.startsWith('api')) return;
     const selected = event.api.getSelectedRows();
     const refs: SelectionRef[] = selected.map((r) => ({ kind: 'void', voidId: r.id }));
     setSelection(refs, 'grid');
@@ -473,7 +498,7 @@ export default function VoidGrid({
   // M14: bulk-apply a status to every selected row (in-memory only).
   const handleBulkStatus = useCallback((status: ApprovalStatus) => {
     const api = gridRef.current?.api;
-    if (!api) return;
+    if (!api || !canEditStatus) return;
     const ids: number[] = [];
     for (const node of api.getSelectedNodes()) {
       if (node.data) {
@@ -482,7 +507,7 @@ export default function VoidGrid({
       }
     }
     if (ids.length > 0) setDirtyIds((prev) => mergeDirty(prev, ids));
-  }, []);
+  }, [canEditStatus]);
 
   const handleColumnToggle = useCallback(
     (colId: string, visible: boolean) => {
@@ -518,7 +543,8 @@ export default function VoidGrid({
               e.target.value = '';
             }
           }}
-          title="Set the approval status for all selected rows"
+          disabled={!canEditStatus}
+          title={canEditStatus ? 'Set the approval status for all selected rows' : readOnlyReason}
         >
           <option value="">Set status…</option>
           {APPROVAL_STATUSES.map((s) => (
@@ -530,8 +556,13 @@ export default function VoidGrid({
 
         {/* M14: in-memory unsaved-edits indicator (write-back deferred) */}
         {dirtyIds.size > 0 && (
-          <span className={styles.dirtyBadge} data-testid="dirty-status" title="Status edits are in-memory only — not written to the .db">
-            {dirtyIds.size} unsaved
+          <span
+            className={styles.dirtyBadge}
+            data-testid="dirty-status"
+            role="status"
+            title="Saving status changes is not built yet. These changes are lost when you reload the page or switch project."
+          >
+            {dirtyIds.size} {dirtyIds.size === 1 ? 'change' : 'changes'} not saved
           </span>
         )}
 

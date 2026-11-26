@@ -22,6 +22,10 @@ import { saveConfig, getMostRecent } from '../features/config/configStore';
 import { clear as clearSelection } from '../store/selectionStore';
 import styles from './Viewer.module.css';
 
+/** Why status editing is off when the data source is read-only. */
+const READ_ONLY_REASON =
+  'Read-only: status changes cannot be saved from this source, so editing is off.';
+
 // ---------------------------------------------------------------------------
 // Viewer state machine
 // ---------------------------------------------------------------------------
@@ -460,8 +464,8 @@ export default function Viewer() {
           className={canWriteBack ? styles.badgeWritable : styles.badgeReadonly}
           title={
             canWriteBack
-              ? 'Connected via File System Access API — write-back will be available'
-              : 'Read-only mode — write-back requires Chromium browser with folder access'
+              ? 'Status edits are allowed but kept in this tab only: saving them is not built yet'
+              : READ_ONLY_REASON
           }
         >
           {canWriteBack ? 'Writable' : 'Read-only'}
@@ -530,6 +534,8 @@ export default function Viewer() {
             includeClosed={includeClosed}
             onIncludeClosedChange={(v) => void handleIncludeClosedChange(v)}
             onStatusChange={handleStatusChange}
+            canEditStatus={canWriteBack}
+            readOnlyReason={READ_ONLY_REASON}
           />
         )}
       </div>

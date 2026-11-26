@@ -293,11 +293,18 @@ const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(
       );
       if (!elementRef) { setElementProperties(null); return; }
 
+      // A lookup still running when the selection changes must not overwrite the panel.
+      let stale = false;
       setPropertiesLoading(true);
       void ctrl.getElementProperties(elementRef.modelId, elementRef.localId).then((props) => {
+        if (stale) return;
         setElementProperties(props);
         setPropertiesLoading(false);
       });
+      return () => {
+        stale = true;
+        setPropertiesLoading(false);
+      };
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [selection, worldReady]);
 
