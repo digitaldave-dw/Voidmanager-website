@@ -100,3 +100,49 @@ export function chooseNearestHit(
   // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
   return voidHit!;
 }
+
+// ---------------------------------------------------------------------------
+// Non-pickable IFC classes
+// ---------------------------------------------------------------------------
+
+/**
+ * IFC classes that are imported (for the model tree and properties) but must not
+ * catch clicks: rooms and other non-physical volumes are invisible or see-through,
+ * so a click "through" them should reach the slab, wall or pipe behind.
+ */
+export const NON_PICKABLE_CATEGORIES: readonly RegExp[] = [
+  /^IFCSPACE$/,
+  /^IFCOPENINGELEMENT$/,
+  /^IFCVIRTUALELEMENT$/,
+  /^IFCSPATIALZONE$/,
+  /^IFCZONE$/,
+];
+
+/** A raw element hit from a fragments raycastAll, before filtering. */
+export interface RawElementHit {
+  localId: number;
+  distance: number;
+  /** Depth along the camera's view direction, when known. */
+  depth?: number;
+}
+
+/**
+ * Return the nearest hit whose localId is not in `excluded`, or null.
+ * Hits with a `depth` below `minDepth` (the camera's near plane) are skipped:
+ * that geometry is clipped and not drawn, so it must not catch the click.
+ * `hits` need not be sorted.
+ */
+export function nearestPickable<T extends RawElementHit>(
+  hits: readonly T[],
+  excluded: ReadonlySet<number>,
+  minDepth = 0,
+): T | null {
+  let best: T | null = null;
+  for (const hit of hits) {
+    if (excluded.has(hit.localId)) continue;
+    if (hit.depth !== undefined && hit.depth < minDepth) continue;
+    if (!Number.isFinite(hit.distance)) continue;
+    if (!best || hit.distance < best.distance) best = hit;
+  }
+  return best;
+}

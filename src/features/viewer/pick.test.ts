@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   chooseNearestHit,
+  nearestPickable,
+  NON_PICKABLE_CATEGORIES,
   type VoidHit,
   type ElementHit,
 } from './pick';
@@ -212,5 +214,44 @@ describe('pick.ts', () => {
     const result = chooseNearestHit(voidHit, elementHit);
     expect(result).toEqual(elementHit);
     expect(result?.kind).toBe('element');
+  });
+});
+
+describe('nearestPickable', () => {
+  const hits = [
+    { localId: 1, distance: 2 }, // room in front
+    { localId: 2, distance: 5 }, // slab behind it
+    { localId: 3, distance: 9 },
+  ];
+
+  it('skips excluded items and returns the nearest remaining hit', () => {
+    expect(nearestPickable(hits, new Set([1]))?.localId).toBe(2);
+  });
+
+  it('returns the nearest hit when nothing is excluded, even if unsorted', () => {
+    expect(nearestPickable([...hits].reverse(), new Set())?.localId).toBe(1);
+  });
+
+  it('skips hits in front of the near plane (clipped, not drawn)', () => {
+    const withDepth = [
+      { localId: 10, distance: 0.7, depth: 0.7 }, // slab around the camera, clipped
+      { localId: 11, distance: 1.1, depth: 1.05 }, // visible pipe
+    ];
+    expect(nearestPickable(withDepth, new Set(), 1)?.localId).toBe(11);
+    expect(nearestPickable(withDepth, new Set(), 0)?.localId).toBe(10);
+  });
+
+  it('returns null when every hit is excluded or there are no hits', () => {
+    expect(nearestPickable(hits, new Set([1, 2, 3]))).toBeNull();
+    expect(nearestPickable([], new Set())).toBeNull();
+  });
+
+  it('treats IfcSpace and IfcOpeningElement as non-pickable, not walls or slabs', () => {
+    const blocked = (c: string) => NON_PICKABLE_CATEGORIES.some((re) => re.test(c));
+    expect(blocked('IFCSPACE')).toBe(true);
+    expect(blocked('IFCOPENINGELEMENT')).toBe(true);
+    expect(blocked('IFCSLAB')).toBe(false);
+    expect(blocked('IFCWALL')).toBe(false);
+    expect(blocked('IFCPIPESEGMENT')).toBe(false);
   });
 });

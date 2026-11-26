@@ -4,7 +4,7 @@
  * Covers: slim merged bar + resizable divider (M8), project-switch mesh rebuild
  * (M9), Zoom to / Zoom to Fit buttons + orbit (M12), model browser tree + element
  * selection routed through the unified store (M13/M11), and in-memory status
- * editing with the unsaved indicator (M14).
+ * editing (M14: disabled for read-only sources).
  *
  * WebGL correctness is only proxied: canvas exists + non-zero size + zero console
  * errors. Selection/UI behaviour is asserted via DOM + the status badges.
@@ -142,25 +142,29 @@ test.describe('PLAN_v2 features (fixture-backed)', () => {
     expect(errors, `Console errors:\n${errors.join('\n')}`).toHaveLength(0);
   });
 
-  test('M14 — bulk status edit marks rows unsaved (in-memory)', async ({ page }) => {
+  test('M14 — read-only source: status editing is off and nothing is marked unsaved', async ({ page }) => {
     test.skip(!DB_EXISTS, 'no DB fixture');
+    // The file-input path opens the .db without write access, so the viewer is read-only.
     const { errors } = await setupViewer(page);
 
     await page.waitForFunction(() => document.querySelectorAll('.ag-row').length > 0, {
       timeout: 20_000,
     });
-    // Select two rows.
-    const checkboxes = page.locator('.ag-row .ag-checkbox-input');
-    await checkboxes.nth(0).click();
-    await checkboxes.nth(1).click();
+    await expect(page.getByText('Read-only', { exact: true })).toBeVisible();
 
-    // Apply a bulk status.
-    await page.getByTestId('bulk-status-select').selectOption('approved');
+    // "Set status…" is disabled and says why.
+    const bulk = page.getByTestId('bulk-status-select');
+    await expect(bulk).toBeDisabled();
+    await expect(bulk).toHaveAttribute('title', /Read-only/);
 
-    // The unsaved indicator appears (>= 1).
-    const dirty = page.getByTestId('dirty-status');
-    await expect(dirty).toBeVisible();
-    await expect(dirty).toContainText('unsaved');
+    // Double-clicking a Status cell does not open an editor.
+    const statusCell = page.locator('.ag-center-cols-container .ag-row').first().locator('[col-id="status"]');
+    const before = await statusCell.textContent();
+    await statusCell.dblclick();
+    await expect(page.locator('.ag-cell-editor, .ag-popup-editor')).toHaveCount(0);
+    await expect(statusCell).toHaveText(before ?? '');
+
+    await expect(page.getByTestId('dirty-status')).toHaveCount(0);
     expect(errors, `Console errors:\n${errors.join('\n')}`).toHaveLength(0);
   });
 

@@ -21,6 +21,11 @@
   flex-shrink: 0;
 }
 
+.bulkSelect:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .summary {
   font-family: var(--font-mono);
   font-size: 0.72rem;
